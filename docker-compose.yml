@@ -1,0 +1,25 @@
+services:
+
+  wacrm:
+
+    build: .
+
+    container_name: wacrm
+
+    working_dir: /app
+
+    ports:
+      - "8085:3000"
+
+    volumes:
+      - .:/app
+      - /app/node_modules
+
+    environment:
+      NODE_ENV: development
+
+    restart: unless-stopped
+
+    stdin_open: true
+
+    tty: true
