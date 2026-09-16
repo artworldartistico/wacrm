@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+import { z } from 'zod'
 import {
   getCurrentAccount,
   requireRole,
@@ -13,6 +14,20 @@ import { AiError, type AiProvider } from '@/lib/ai/types'
 function bad(message: string) {
   return NextResponse.json({ error: message }, { status: 400 })
 }
+
+const aiConfigBodySchema = z.object({
+  provider: z.enum(['openai', 'anthropic', 'google']),
+  model: z.string(),
+  system_prompt: z.string().nullable().optional(),
+  is_active: z.boolean().optional(),
+  auto_reply_enabled: z.boolean().optional(),
+  auto_reply_max_per_conversation: z.union([z.number(), z.string()]).optional(),
+  handoff_agent_id: z.string().nullable().optional(),
+  api_key: z.string().optional(),
+  embeddings_api_key: z.string().nullable().optional(),
+})
+
+export type AiConfigBody = z.infer<typeof aiConfigBodySchema>
 
 /**
  * GET /api/ai/config
@@ -74,13 +89,20 @@ export async function POST(request: Request) {
     const limit = checkRateLimit(`ai-config:${userId}`, RATE_LIMITS.adminAction)
     if (!limit.success) return rateLimitResponse(limit)
 
-    const body = await request.json().catch(() => null)
-    if (!body || typeof body !== 'object') return bad('Invalid request body')
+    const rawBody = await request.json().catch(() => null)
+    if (!rawBody || typeof rawBody !== 'object') return bad('Invalid request body')
 
-    const provider = body.provider as AiProvider
-    if (provider !== 'openai' && provider !== 'anthropic' && provider !== 'google') {
-      return bad('provider must be "openai", "anthropic", or "google"')
+    const parsed = aiConfigBodySchema.safeParse(rawBody)
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0]
+      if (issue.path[0] === 'provider') {
+        return bad('provider must be "openai", "anthropic", or "google"')
+      }
+      return bad(issue.message)
     }
+
+    const body = parsed.data
+    const provider = body.provider as AiProvider
     const model = typeof body.model === 'string' ? body.model.trim() : ''
     if (!model) return bad('model is required')
 
