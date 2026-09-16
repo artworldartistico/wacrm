@@ -1,6 +1,11 @@
 import { NextResponse } from 'next/server'
 import type { SupabaseClient } from '@supabase/supabase-js'
-import { createClient } from '@/lib/supabase/server'
+import {
+  ForbiddenError,
+  UnauthorizedError,
+  requireRole,
+  toErrorResponse,
+} from '@/lib/auth/account'
 import { decrypt } from '@/lib/whatsapp/encryption'
 import { submitMessageTemplate } from '@/lib/whatsapp/meta-api'
 import {
@@ -8,7 +13,7 @@ import {
   type TemplatePayload,
 } from '@/lib/whatsapp/template-validators'
 import { buildMetaTemplatePayload } from '@/lib/whatsapp/template-components'
-import { ensureImageHeaderHandle } from '@/lib/whatsapp/template-header-handle'
+import { ensureMediaHeaderHandle } from '@/lib/whatsapp/template-header-handle'
 import { normalizeStatus } from '@/lib/whatsapp/template-status-normalize'
 
 /**
@@ -88,29 +93,13 @@ async function upsertTemplateRow(
  */
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient()
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser()
-    if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
-    }
-
-    // Resolve the caller's account_id — whatsapp_config + the
-    // message_templates row are account-scoped post-multi-user.
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('account_id')
-      .eq('user_id', user.id)
-      .maybeSingle()
-    const accountId = profile?.account_id as string | undefined
-    if (!accountId) {
-      return NextResponse.json(
-        { error: 'Your profile is not linked to an account.' },
-        { status: 403 },
-      )
-    }
+    // Message templates are settings-class data: `canEditSettings` and the
+    // message_templates_insert/update RLS policies (migration 017) both
+    // require 'admin'. Resolving account_id off the profile only proved
+    // membership, so a viewer or agent could push a template to Meta for
+    // approval — an external side effect RLS can't roll back — before the
+    // local upsert was refused.
+    const { supabase, accountId, userId } = await requireRole('admin')
 
     let payload: TemplatePayload
     try {
@@ -175,15 +164,16 @@ export async function POST(request: Request) {
 
       const accessToken = decrypt(config.access_token)
 
-      // Image headers need a Resumable-Upload handle (Meta rejects a
-      // plain URL at creation). Derive it from header_media_url before
-      // building the payload. Surfaces a 400 with an actionable message
-      // (missing META_APP_ID, unreachable URL, wrong type/size).
+      // Media headers (image/video/document) need a Resumable-Upload
+      // handle (Meta rejects a plain URL at creation). Derive it from
+      // header_media_url before building the payload. Surfaces a 400 with
+      // an actionable message (missing META_APP_ID, unreachable URL,
+      // wrong type/size).
       try {
-        await ensureImageHeaderHandle(payload, accessToken)
+        await ensureMediaHeaderHandle(payload, accessToken)
       } catch (e) {
         return NextResponse.json(
-          { error: e instanceof Error ? e.message : 'Header image upload failed.' },
+          { error: e instanceof Error ? e.message : 'Header media upload failed.' },
           { status: 400 },
         )
       }
@@ -203,7 +193,7 @@ export async function POST(request: Request) {
         // until they fix and re-submit.
         await upsertTemplateRow(
           supabase,
-          buildUpsertRow(accountId, user.id, payload, {
+          buildUpsertRow(accountId, userId, payload, {
             status: 'DRAFT',
             metaTemplateId: null,
             submissionError: message,
@@ -223,7 +213,7 @@ export async function POST(request: Request) {
 
     const { data: row, error: upsertErr } = await upsertTemplateRow(
       supabase,
-      buildUpsertRow(accountId, user.id, payload, {
+      buildUpsertRow(accountId, userId, payload, {
         status: normalizeStatus(metaStatus),
         metaTemplateId,
         submissionError: null,
@@ -249,6 +239,16 @@ export async function POST(request: Request) {
       dry_run: dryRun,
     })
   } catch (error) {
+    // Auth failures map to 401/403. Handled before the generic branch
+    // below, which surfaces `error.message` as a 500 — reporting "you
+    // aren't an admin" as a template submission failure would send the
+    // user chasing the wrong problem.
+    if (
+      error instanceof UnauthorizedError ||
+      error instanceof ForbiddenError
+    ) {
+      return toErrorResponse(error)
+    }
     console.error('Error submitting template:', error)
     return NextResponse.json(
       {

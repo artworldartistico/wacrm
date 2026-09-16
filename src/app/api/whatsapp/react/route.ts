@@ -1,8 +1,8 @@
 import { NextResponse } from 'next/server';
-import { createClient } from '@/lib/supabase/server';
+import { requireRole, toErrorResponse } from '@/lib/auth/account';
 import { sendReactionMessage } from '@/lib/whatsapp/meta-api';
 import { decrypt } from '@/lib/whatsapp/encryption';
-import { sanitizePhoneForMeta } from '@/lib/whatsapp/phone-utils';
+import { resolveContactSendTarget } from '@/lib/whatsapp/wa-identity';
 import {
   checkRateLimit,
   rateLimitResponse,
@@ -20,35 +20,15 @@ import {
  */
 export async function POST(request: Request) {
   try {
-    const supabase = await createClient();
+    // Reacting is a write operation (`canSendMessages`), and it pushes the
+    // reaction to Meta before mirroring it locally — so, as on /send, a
+    // missing role check let a read-only viewer put a visible reaction on
+    // the customer's message even though RLS blocked the local mirror.
+    const { supabase, accountId, userId } = await requireRole('agent');
 
-    const {
-      data: { user },
-      error: authError,
-    } = await supabase.auth.getUser();
-
-    if (authError || !user) {
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-    }
-
-    const limit = checkRateLimit(`react:${user.id}`, RATE_LIMITS.react);
+    const limit = checkRateLimit(`react:${userId}`, RATE_LIMITS.react);
     if (!limit.success) {
       return rateLimitResponse(limit);
-    }
-
-    // Resolve the caller's account_id so conversation + whatsapp_config
-    // lookups work for teammates who didn't author the rows directly.
-    const { data: profile } = await supabase
-      .from('profiles')
-      .select('account_id')
-      .eq('user_id', user.id)
-      .maybeSingle();
-    const accountId = profile?.account_id as string | undefined;
-    if (!accountId) {
-      return NextResponse.json(
-        { error: 'Your profile is not linked to an account.' },
-        { status: 403 },
-      );
     }
 
     const body = await request.json();
@@ -86,7 +66,7 @@ export async function POST(request: Request) {
 
     const { data: conversation, error: convError } = await supabase
       .from('conversations')
-      .select('id, account_id, contact:contacts(phone)')
+      .select('id, account_id, contact:contacts(phone, wa_user_id)')
       .eq('id', targetMessage.conversation_id)
       .eq('account_id', accountId)
       .maybeSingle();
@@ -101,9 +81,12 @@ export async function POST(request: Request) {
     const contact = Array.isArray(conversation.contact)
       ? conversation.contact[0]
       : conversation.contact;
-    if (!contact?.phone) {
+    // Phone number, or the business-scoped user ID for a contact Meta
+    // never gave us a number for (issue #519).
+    const sendTarget = resolveContactSendTarget(contact);
+    if (!sendTarget) {
       return NextResponse.json(
-        { error: 'Contact phone number not found' },
+        { error: 'Contact has no phone number or WhatsApp user ID' },
         { status: 400 },
       );
     }
@@ -123,13 +106,12 @@ export async function POST(request: Request) {
     }
 
     const accessToken = decrypt(config.access_token);
-    const sanitizedPhone = sanitizePhoneForMeta(contact.phone);
 
     try {
       await sendReactionMessage({
         phoneNumberId: config.phone_number_id,
         accessToken,
-        to: sanitizedPhone,
+        to: sendTarget.target,
         targetMessageId: targetMessage.message_id,
         emoji,
       });
@@ -150,7 +132,7 @@ export async function POST(request: Request) {
         .delete()
         .eq('message_id', targetMessage.id)
         .eq('actor_type', 'agent')
-        .eq('actor_id', user.id);
+        .eq('actor_id', userId);
 
       if (delError) {
         console.error('[whatsapp/react] DB delete failed:', delError.message);
@@ -167,7 +149,7 @@ export async function POST(request: Request) {
           message_id: targetMessage.id,
           conversation_id: targetMessage.conversation_id,
           actor_type: 'agent',
-          actor_id: user.id,
+          actor_id: userId,
           emoji,
         },
         { onConflict: 'message_id,actor_type,actor_id' },
@@ -184,10 +166,9 @@ export async function POST(request: Request) {
 
     return NextResponse.json({ success: true });
   } catch (error) {
+    // requireRole throws Unauthorized/Forbidden; toErrorResponse maps
+    // those to 401/403 and collapses anything else to a generic 500.
     console.error('Error in WhatsApp react POST:', error);
-    return NextResponse.json(
-      { error: 'Failed to react to message' },
-      { status: 500 },
-    );
+    return toErrorResponse(error);
   }
 }

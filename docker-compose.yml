@@ -1,22 +1,38 @@
+name: wacrm
+
 services:
-
   wacrm:
-
-    build: .
+    build:
+      context: .
+      # NEXT_PUBLIC_* vars are inlined at build time — forward them
+      # from .env as build args. Changing any of them requires
+      # a rebuild (docker compose up --build).
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-}
+        NEXT_PUBLIC_APP_LOCALE: ${NEXT_PUBLIC_APP_LOCALE:-en}
 
     container_name: wacrm
 
     working_dir: /app
 
-    ports:
-      - "8085:3000"
+    # Runtime (server-only) secrets come from .env; they are
+    # never baked into the image.
+    env_file:
+      - .env
 
     volumes:
       - .:/app
       - /app/node_modules
 
+    # The server always listens on 3000 inside the container.
     environment:
       NODE_ENV: development
+      PORT: 3000
+
+    ports:
+      - '${HOST_PORT:-8085}:3000'
 
     command: npm run dev
 
@@ -25,3 +41,16 @@ services:
     stdin_open: true
 
     tty: true
+
+    healthcheck:
+      test:
+        [
+          'CMD',
+          'node',
+          '-e',
+          "fetch('http://localhost:3000').then((r)=>process.exit(r.ok||r.status<500?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
