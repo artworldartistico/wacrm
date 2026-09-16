@@ -7,9 +7,10 @@ import {
   type ProviderArgs,
 } from './shared'
 
-// Gemini generateContent REST endpoint (v1beta).
+// Gemini generateContent REST endpoint (v1 stable).
 // Docs: https://ai.google.dev/api/generate-content
-const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models'
+// Note: gemini-1.5-* and gemini-2.0-* models are available on v1 (not v1beta).
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1/models'
 
 interface GeminiResponse {
   candidates?: {
@@ -32,7 +33,11 @@ interface GeminiResponse {
 export async function generateGemini(args: ProviderArgs): Promise<ProviderResult> {
   const { apiKey, model, systemPrompt, messages, timeoutMs } = args
 
-  const url = `${GEMINI_BASE_URL}/${encodeURIComponent(model)}:generateContent?key=${apiKey}`
+  // Strip any accidental "models/" prefix the user may have typed —
+  // the base URL already contains "/models", so a duplicate would 404.
+  const modelId = model.trim().replace(/^models\//, '')
+
+  const url = `${GEMINI_BASE_URL}/${encodeURIComponent(modelId)}:generateContent?key=${apiKey}`
 
   // Gemini uses a "contents" array with role "user"/"model" (not "assistant").
   const merged = mergeConsecutive(messages)
