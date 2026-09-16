@@ -1,5 +1,10 @@
 # wacrm — CRM Template for WhatsApp
 
+> **Fork de implementación.** Esta instancia está containerizada con Docker,
+> conectada a Supabase y desplegada de forma continua desde este repositorio.
+> El proceso completo está documentado en
+> [docs/IMPLEMENTACION.md](./docs/IMPLEMENTACION.md) · [Dossier técnico](URL-del-dossier)
+
 > Self-hostable CRM template for WhatsApp® — shared inbox, contacts,
 > sales pipelines, broadcasts, and no-code automations. Fork it, brand
 > it, host it.
